@@ -179,7 +179,14 @@ export const ContextMenu = () => {
               }
               bus.emit("tool", "package_download")
             } else {
-              batchDownloadSelected()
+              // fork 注入点 1/1：单文件「下载」改为直接打开直链，不再走批量下载
+              const a = document.createElement("a")
+              a.href = rawLink(props, true)
+              a.target = "_blank"
+              a.rel = "noopener noreferrer"
+              document.body.appendChild(a)
+              a.click()
+              document.body.removeChild(a)
             }
           }}
         >
