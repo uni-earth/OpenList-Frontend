@@ -5,12 +5,14 @@ import {
   ProgressIndicator,
   ProgressLabel,
   Text,
+  IconButton,
+  Box,
 } from "@hope-ui/solid"
 import { Motion } from "solid-motionone"
 import { useContextMenu } from "solid-contextmenu"
 import { batch, Show } from "solid-js"
 import { LinkWithPush } from "~/components"
-import { usePath, useRouter, useUtil } from "~/hooks"
+import { usePath, useRouter, useUtil, useLink } from "~/hooks"
 import {
   checkboxOpen,
   getMainColor,
@@ -32,6 +34,8 @@ import {
 } from "~/utils"
 import { getIconByObj } from "~/utils/icon"
 import { ItemCheckbox, useSelectWithMouse } from "./helper"
+// fork 注入点 1/5
+import { operations } from "../toolbar/operations"
 
 export interface Col {
   name: OrderBy
@@ -39,10 +43,11 @@ export interface Col {
   w: any
 }
 
+// fork 注入点 2/5：为悬浮按钮预留空间，收回 name/size 列宽
 export const cols: Col[] = [
-  { name: "name", textAlign: "left", w: { "@initial": "76%", "@md": "50%" } },
-  { name: "size", textAlign: "right", w: { "@initial": "24%", "@md": "17%" } },
-  { name: "modified", textAlign: "right", w: { "@initial": 0, "@md": "33%" } },
+  { name: "name", textAlign: "left", w: { "@initial": "76%", "@md": "65%" } },
+  { name: "size", textAlign: "right", w: { "@initial": "24%", "@md": "12%" } },
+  { name: "modified", textAlign: "right", w: { "@initial": 0, "@md": "23%" } },
 ]
 
 export const ListItem = (props: { obj: StoreObj; index: number }) => {
@@ -53,6 +58,7 @@ export const ListItem = (props: { obj: StoreObj; index: number }) => {
   const { setPathAs } = usePath()
   const { show } = useContextMenu({ id: 1 })
   const { pushHref, to } = useRouter()
+  const { rawLink } = useLink()
   const { openWithDoubleClick, toggleWithClick, restoreSelectionCache } =
     useSelectWithMouse()
   const filenameStyle = () => local["list_item_filename_overflow"]
@@ -66,6 +72,8 @@ export const ListItem = (props: { obj: StoreObj; index: number }) => {
       }}
     >
       <HStack
+        // fork 注入点 3/5：_groupHover 依赖 role="group"
+        role="group"
         classList={{ selected: !!props.obj.selected }}
         class="list-item viselect-item"
         data-index={props.index}
@@ -110,7 +118,8 @@ export const ListItem = (props: { obj: StoreObj; index: number }) => {
           show(e, { props: props.obj })
         }}
       >
-        <HStack class="name-box" spacing="$1" w={cols[0].w}>
+        {/* fork 注入点 4/5：name-box 作为悬浮按钮的定位父级 */}
+        <HStack class="name-box" spacing="$1" w={cols[0].w} position="relative">
           <Show when={checkboxOpen()}>
             <ItemCheckbox
               // colorScheme="neutral"
@@ -144,6 +153,8 @@ export const ListItem = (props: { obj: StoreObj; index: number }) => {
           />
           <Text
             class="name"
+            flex={1}
+            pr={{ "@initial": "$2", "@md": "$24" }}
             css={{
               wordBreak: "break-all",
               whiteSpace: filenameStyle() === "multi_line" ? "unset" : "nowrap",
@@ -161,6 +172,74 @@ export const ListItem = (props: { obj: StoreObj; index: number }) => {
           >
             {props.obj.name}
           </Text>
+
+          {/* fork 注入点 5/5：悬浮按钮组（分享 / 下载，替代官方版无此功能） */}
+          <Box
+            position="absolute"
+            right="$4"
+            top="50%"
+            transform="translateY(-50%)"
+            display={{ "@initial": "none", "@md": "flex" }}
+            opacity={0}
+            _groupHover={{ opacity: 1 }}
+            transition="opacity 0.2s"
+            zIndex={10}
+            on:click={(e: MouseEvent) => e.stopPropagation()}
+          >
+            <HStack spacing="$1">
+              <IconButton
+                variant="ghost"
+                size="md"
+                compact
+                aria-label="share"
+                icon={
+                  <Icon
+                    as={operations["share"].icon}
+                    color={operations["share"].color}
+                    boxSize="$5"
+                  />
+                }
+                on:click={(e: MouseEvent) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  batch(() => {
+                    selectIndex(props.index, true, true)
+                  })
+                  bus.emit("tool", "share")
+                }}
+              />
+
+              {/* 固定 40px 占位，目录无下载按钮时分享按钮不位移 */}
+              <Box w="40px" display="flex" justifyContent="center">
+                <Show when={!props.obj.is_dir}>
+                  <IconButton
+                    variant="ghost"
+                    size="md"
+                    compact
+                    aria-label="download"
+                    icon={
+                      <Icon
+                        as={operations["download"].icon}
+                        color={operations["download"].color}
+                        boxSize="$5"
+                      />
+                    }
+                    on:click={(e: MouseEvent) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const a = document.createElement("a")
+                      a.href = rawLink(props.obj, true)
+                      a.target = "_blank"
+                      a.rel = "noopener noreferrer"
+                      document.body.appendChild(a)
+                      a.click()
+                      document.body.removeChild(a)
+                    }}
+                  />
+                </Show>
+              </Box>
+            </HStack>
+          </Box>
         </HStack>
         <Show
           fallback={
