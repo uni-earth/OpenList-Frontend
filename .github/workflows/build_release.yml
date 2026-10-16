@@ -1,194 +1,128 @@
-# This workflow is used to create a (pre-)release build of the OpenList frontend.
+# fork 覆盖 —— 本文件整体替换官方 .github/workflows/build_release.yml
 #
-# This will:
+# 官方原版流程做的事（GPG 签名提交、打 tag、changelog、Crowdin i18n 同步、
+# npm 发布、正式/精简双版本构建）在 fork 里大多用不上，且依赖
+# BOT_TOKEN / BOT_GPG_PRIVATE_KEY / CROWDIN_* 等 secrets，fork 里没有会直接失败，
+# 因此改为下面这个自包含的精简流程。
 #
-# - Update the `package.json` version to the specified version (when triggered
-#   by `workflow_dispatch`), commit the changes and tag it.
-# - Upload the release assets to GitHub.
-# - Publish the package to npm.
+# 产物结构与官方 build.sh --release --compress 完全一致，OpenList 后端可直接消费：
+#   - 归档根目录为 "./"（不是 dist/）
+#   - dist/VERSION 内含版本号
+#   - 额外产出 i18n.tar.gz 多语言包
 #
-# # Usage
-#
-# This workflow can be triggered by:
-#
-# - Pushing a tag that matches the pattern `v[0-9]+.[0-9]+.[0-9]+*` (semver format).
-# - Manually via the GitHub Actions UI with a version input.
-#
-# To create (pre-)release builds, we recommend that you use the `workflow_dispatch`.
+# 若想连这最后一个冲突源也消掉：把本文件改名为 fork_release.yml，
+# 官方同名文件保持原样即可（两者不会互相触发）。
 
-name: Release Build
+name: Fork Release Build
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_dispatch:
     inputs:
       version:
-        description: |
-          Target version (e.g., 1.0.0), will create a tag named 'v<version>' and update package.json version
+        description: "前端版本号，例如 4.2.7（建议带 fork 后缀如 4.2.7-fork1，避免与上游 tag 撞名）"
         required: true
         type: string
 
+permissions:
+  contents: write
+
 jobs:
-  release:
-    name: Release
+  fork-build-release:
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          fetch-depth: 0
-          submodules: recursive
-          token: ${{ secrets.BOT_TOKEN }}
+          node-version: "22"
 
-      - name: Validate and trim semver
-        id: semver
-        uses: matt-usurp/validate-semver@v3.0.0
-        with:
-          version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
-
-      - name: Check if version is pre-release
-        id: check_pre_release
-        run: |
-          if [[ -z "${{ steps.semver.outputs.prerelease }}" && -z "${{ steps.semver.outputs.build }}" ]]; then
-            echo "is_pre_release=false" >> $GITHUB_OUTPUT
-          else
-            echo "is_pre_release=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24.21.0"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
           run_install: false
 
-      - name: Import GPG key
-        if: github.event_name == 'workflow_dispatch'
-        uses: crazy-max/ghaction-import-gpg@v7
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set frontend version
+        run: |
+          jq --arg version "$VERSION" '.version = $version' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "VERSION_TAG=v${VERSION}" >> "$GITHUB_ENV"
+
+      # i18n 走离线路径：优先拉上游 edge 多语言包，失败则用仓库内已有的 en
+      - name: Prepare i18n
+        run: |
+          curl -fL --retry 3 -o i18n-src.tar.gz \
+            https://github.com/OpenListTeam/OpenList-Frontend/releases/download/edge/i18n.tar.gz \
+            && tar -xzf i18n-src.tar.gz -C src/lang \
+            || echo "::warning::未取到上游 i18n 包，使用仓库内现有语言文件"
+          node ./scripts/i18n.mjs
+
+      # ============ 标准版 ============
+      - name: Build standard
+        run: pnpm build
+
+      - name: Package standard
+        run: |
+          set -e
+          test -f dist/index.html
+          echo -n "$VERSION_TAG" > dist/VERSION
+
+          # 注意：-C dist . 让归档根目录为 "./"。直接 tar dist 会在解包后多一层
+          # dist/，后端 build.sh 取不到文件。
+          tar -czf "openlist-frontend-dist-${VERSION_TAG}.tar.gz" -C dist .
+
+          tar -czf i18n.tar.gz --exclude=en -C src/lang .
+
+          mkdir -p release
+          mv "openlist-frontend-dist-${VERSION_TAG}.tar.gz" i18n.tar.gz release/
+
+      # ============ 精简版 ============
+      - name: Build lite
+        run: pnpm build:lite
+
+      - name: Package lite
+        run: |
+          set -e
+          test -f dist/index.html
+          echo -n "$VERSION_TAG" > dist/VERSION
+
+          tar -czf "openlist-frontend-dist-lite-${VERSION_TAG}.tar.gz" -C dist .
+
+          mkdir -p lite-release
+          mv "openlist-frontend-dist-lite-${VERSION_TAG}.tar.gz" lite-release/
+
+      - name: Verify archive structure
+        run: |
+          echo "=== standard ==="
+          tar -tzf "release/openlist-frontend-dist-${VERSION_TAG}.tar.gz" | head -20
+          echo "=== lite ==="
+          tar -tzf "lite-release/openlist-frontend-dist-lite-${VERSION_TAG}.tar.gz" | head -10
+          echo "=== version file ==="
+          tar -xzOf "release/openlist-frontend-dist-${VERSION_TAG}.tar.gz" ./VERSION
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          gpg_private_key: ${{ secrets.BOT_GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.BOT_GPG_PASSPHRASE }}
-          git_user_signingkey: true
-          git_commit_gpgsign: true
-          git_tag_gpgsign: true
+          tag_name: ${{ env.VERSION_TAG }}
+          name: ${{ env.VERSION_TAG }}
+          body: |
+            Fork build of OpenList Frontend ${{ env.VERSION_TAG }}
 
-      - name: Setup CI Bot
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git config user.name "${{ secrets.BOT_USERNAME }}"
-          git config user.email "${{ secrets.BOT_USEREMAIL }}"
+            - `openlist-frontend-dist-${{ env.VERSION_TAG }}.tar.gz`（标准版，归档根为 `./`）
+            - `openlist-frontend-dist-lite-${{ env.VERSION_TAG }}.tar.gz`（精简版）
+            - `i18n.tar.gz`（多语言包）
 
-      - name: Update package.json and commit
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          jq --arg version "${{ steps.semver.outputs.version }}" '.version = $version' package.json > package.json.tmp && mv package.json.tmp package.json
-          git add package.json
-          git commit -S -m "chore: release v${{ steps.semver.outputs.version }}" --no-verify
-          git push
-
-          # For local build, needn't push, the tag will be created by `gh release create`
-          git tag -s "v${{ steps.semver.outputs.version }}" -m "Release v${{ steps.semver.outputs.version }}"
-
-      - name: Get current tag
-        id: get_current_tag
-        run: |
-          # Remove existing tag `edge`, since `edge` should always point to the latest commit
-          # This is necessary to avoid conflicts with the changelog generation
-          git tag -d edge 2>/dev/null || true
-
-          # Get the current tag
-          CURRENT_TAG=$(git describe --tags --abbrev=0)
-          echo "current_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
-
-          # Temporarily remove all pre-release tags (tags containing '-' / '+')
-          # This prevents them from interfering with changelog generation
-          PRE_RELEASE_TAGS=$(git tag -l | grep -E "(-|\+)" || true)
-          if [ -n "$PRE_RELEASE_TAGS" ]; then
-            echo "Temporarily removing pre-release tags: $PRE_RELEASE_TAGS"
-            echo "$PRE_RELEASE_TAGS" | xargs -r git tag -d
-          fi
-
-          # Add back the current tag if is a pre-release
-          # Should not add `-f`, as it will overwrite the existing tag
-          if [[ "${{ steps.check_pre_release.outputs.is_pre_release }}" == "true" ]]; then
-            git tag -s "$CURRENT_TAG" -m "Release $CURRENT_TAG"
-          fi
-
-      - name: Generate changelog
-        id: generate_changelog
-        run: |
-          npx changelogithub --output ${{ github.workspace }}-CHANGELOG.txt || echo "" > ${{ github.workspace }}-CHANGELOG.txt
-
-      - name: Build Release
-        run: |
-          chmod +x build.sh
-          ./build.sh --release --compress
-        env:
-          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
-          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
-
-      - name: Move regular build
-        run: |
-          mkdir -p regular-dist
-          mv dist/* regular-dist/
-
-      - name: Build Lite Release
-        run: |
-          chmod +x build.sh
-          ./build.sh --release --compress --lite
-        env:
-          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
-          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
-
-      - name: Move lite build and restore regular build
-        run: |
-          mkdir -p lite-dist
-          mv dist/* lite-dist/
-          mv regular-dist/* dist/
-
-      - name: Upload Release Assets
-        run: |
-          # Delete local tag, or gh cli will complain about it.
-          git tag -d ${{ steps.get_current_tag.outputs.current_tag }}
-          gh release create \
-            --title "Release ${{ steps.get_current_tag.outputs.current_tag }}" \
-            --notes-file "${{ github.workspace }}-CHANGELOG.txt" \
-            --prerelease=${{ steps.check_pre_release.outputs.is_pre_release }} \
-            ${{ steps.get_current_tag.outputs.current_tag }} \
-            dist/openlist-frontend-dist-v*.tar.gz lite-dist/openlist-frontend-dist-lite-v*.tar.gz dist/i18n.tar.gz
+            产物结构与上游 `build.sh --release --compress` 一致，可直接被 OpenList 后端消费。
+          files: |
+            release/openlist-frontend-dist-${{ env.VERSION_TAG }}.tar.gz
+            release/i18n.tar.gz
+            lite-release/openlist-frontend-dist-lite-${{ env.VERSION_TAG }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare for npm
-        run: |
-          # Delete the generated dist tarball
-          rm -f dist/openlist-frontend-dist-v*.tar.gz
-          rm -f lite-dist/openlist-frontend-dist-lite-v*.tar.gz
-          # Copy the lite version
-          mkdir dist/lite
-          cp -r lite-dist/. dist/lite/
-
-          if ! jq -e '.name and .version' package.json > /dev/null; then
-            echo "Error: Invalid package.json"
-            exit 1
-          fi
-
-      - name: Publish npm (Trusted publishing)
-        run: |
-          if [ "${{ secrets[format('{0}', 'NPM_PUBLISH')] }}" = "yes" ]; then
-            echo "NPM_PUBLISH=yes, publishing to npm with trusted publishing..."
-            pnpm publish --no-git-checks --access public --provenance
-          else
-            echo "NPM_PUBLISH is not yes, performing dry run"
-            pnpm publish --dry-run --no-git-checks --access public
-          fi
-
-permissions:
-  contents: write
-  id-token: write
