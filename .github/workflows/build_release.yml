@@ -10,6 +10,9 @@
 #   - dist/VERSION 内含版本号
 #   - 额外产出 i18n.tar.gz 多语言包
 #
+# 语言包：仓库不携带语言文件，构建时从官方 release 拉取 zh-CN（只解简体，
+# 不引入 zh-TW）。因此 fork 里不需要提交任何语言包；代价是构建需能访问 GitHub。
+#
 # 若想连这最后一个冲突源也消掉：把本文件改名为 fork_release.yml，
 # 官方同名文件保持原样即可（两者不会互相触发）。
 
@@ -55,13 +58,18 @@ jobs:
           mv package.json.tmp package.json
           echo "VERSION_TAG=v${VERSION}" >> "$GITHUB_ENV"
 
-      # i18n 走离线路径：优先拉上游 edge 多语言包，失败则用仓库内已有的 en
+      # i18n：拉官方 zh-CN 语言包（只解出 ./zh-CN，不要 zh-TW）。
+      # 先按 I18N_REF 拉，失败退 edge；两次都失败直接中断，不发只有英文的包。
       - name: Prepare i18n
+        env:
+          I18N_REF: v4.2.7 # 升级前端版本时同步改这里
         run: |
-          curl -fL --retry 3 -o i18n-src.tar.gz \
-            https://github.com/OpenListTeam/OpenList-Frontend/releases/download/edge/i18n.tar.gz \
-            && tar -xzf i18n-src.tar.gz -C src/lang \
-            || echo "::warning::未取到上游 i18n 包，使用仓库内现有语言文件"
+          set -euo pipefail
+          base="https://github.com/OpenListTeam/OpenList-Frontend/releases/download"
+          curl -fL --retry 3 -o i18n.tar.gz "${base}/${I18N_REF}/i18n.tar.gz" \
+            || curl -fL --retry 3 -o i18n.tar.gz "${base}/edge/i18n.tar.gz"
+          tar -xzf i18n.tar.gz -C src/lang ./zh-CN
+          rm -f i18n.tar.gz
           node ./scripts/i18n.mjs
 
       # ============ 标准版 ============
